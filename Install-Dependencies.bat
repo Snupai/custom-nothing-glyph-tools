@@ -99,58 +99,6 @@ REM ---------------------------Check for winget---------------------------------
     )
 )
 
-REM ---------------------------Automated WinGet install--------------------------------------------------
-
-call :PrintInfo "Downloading WinGet and its dependencies..."
-
-
-@(
-    (
-        REM Download the latest version of WinGet and save it to the .tmp folder as WinGet.msixbundle
-        powershell -Command "Invoke-WebRequest -Uri "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" -OutFile '%~dp0/.tmp/WinGet.msixbundle'"
-        REM Get hash of the latest version of WinGet from web and save it to the .tmp folder as hash.txt
-        powershell -Command "Invoke-WebRequest -Uri "https://github.com/microsoft/winget-cli/releases/latest/download/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.txt" -OutFile '%~dp0/.tmp/hash.txt'"
-
-        REM Download winget dependencies (Microsoft.VCLibs, Microsoft.UI.Xaml) and save them to the .tmp folder (https://learn.microsoft.com/en-us/windows/package-manager/winget/#install-winget-on-windows-sandbox)
-        powershell -Command "Invoke-WebRequest -Uri "https://aka.ms/Microsoft.VCLibs.x64.14.00.Desktop.appx" -OutFile '%~dp0/.tmp/Microsoft.VCLibs.x64.14.00.Desktop.appx'"
-        powershell -Command "Invoke-WebRequest -Uri "https://github.com/microsoft/microsoft-ui-xaml/releases/download/v2.7.3/Microsoft.UI.Xaml.2.7.x64.appx" -OutFile '%~dp0/.tmp/Microsoft.UI.Xaml.2.7.x64.appx'"
-    ) || (
-        REM Error downloading
-        call :PrintError "Could not download WinGet. Do you have a working internet connection?"
-        goto :manualInstall
-    )
-)
-
-REM Get hash of WinGet.msixbundle and save it to the .tmp folder as file_hash.txt
-CertUtil -hashfile "%~dp0/.tmp/WinGet.msixbundle" SHA256 > "%~dp0/.tmp/file_hash.txt"
-
-REM Get the hash value from the hash.txt file
-(for /L %%i in (1,1,1) do set /P "hash=") < "%~dp0/.tmp/hash.txt"
-call :PrintInfo "The file hash should be: %hash%"
-
-REM Get the hash value from the file_hash.txt file
-(for /L %%i in (1,1,2) do set /P "file_hash=") < "%~dp0/.tmp/file_hash.txt"
-call :PrintInfo "The file hash is:        %file_hash%"
-
-REM Compare the hash values
-if "%file_hash%"=="%hash%" (
-    call :PrintInfo "The hashes match!"
-) else (
-    call :PrintInfo "The hashes do not match."
-    goto :manualInstall
-)
-
-REM If the installation doesn't fail, try if winget works now
-@(
-    (
-        powershell -Command "Add-AppxPackage '%~dp0/.tmp/WinGet.msixbundle' -DependencyPath "'%~dp0/.tmp/Microsoft.VCLibs.x64.14.00.Desktop.appx', '%~dp0/.tmp/Microsoft.UI.Xaml.2.7.x64.appx'""
-    ) && (
-        goto :tryWinget
-    )
-)
-
-call :PrintWarning "Automatic installation failed."
-
 REM ---------------------------Manual WinGet install-----------------------------------------------------
 
 :manualInstall
@@ -163,16 +111,21 @@ goto :tryWinget
 
 REM ---------------------------Install dependencies-----------------------------------------------------
 
-REM Ask the user if they want to install Audacity or not which is optional
+REM Update the winget sources before installing anything
 :install
+winget source update
+
+REM Ask the user if they want to install Audacity or not which is optional
+:audacityQuestion
 set /p "install=Do you want to install Audacity? [y/n]: "
 if /i "%install%"=="y" goto :fullInstall
 if /i "%install%"=="n" goto :basicInstall
-goto :install
+goto :audacityQuestion
 
 :fullInstall
 REM Install Audacity
 winget install Audacity.Audacity
+call :CheckWinGetResult %ERRORLEVEL% "Audacity"
 echo.
 
 :basicInstall
@@ -186,6 +139,7 @@ REM Install the rest of the programs
         REM ffmpeg is not installed, install it
         call :PrintInfo "Installing ffmpeg..."
         winget install Gyan.FFmpeg
+        call :CheckWinGetResult %ERRORLEVEL% "FFmpeg"
     )
 )
 echo.
@@ -199,6 +153,7 @@ REM if Get-Package Python* is not throwing an error check if python is in the pa
         REM python is not installed, install it
         call :PrintInfo "Installing python..."
         winget install Python.Python.3.11
+        call :CheckWinGetResult %ERRORLEVEL% "Python 3.11"
         goto :refreshEnv
     )
 )
@@ -209,7 +164,7 @@ setlocal enabledelayedexpansion
     ) && (
         call :PrintInfo "python is already in PATH. Skipping..."
         REM No need to refresh environment variables if python is already working
-        goto :installPythonStuff
+        goto :python3Check
     ) || (
         REM python is not installed, install it
         call :PrintWarning "python is not in path."
@@ -222,6 +177,7 @@ setlocal enabledelayedexpansion
             echo.
             call :PrintInfo "Installing python..."
             winget install Python.Python.3.11
+            call :CheckWinGetResult %ERRORLEVEL% "Python 3.11"
             goto :refreshEnv
         )
         endlocal
@@ -253,6 +209,51 @@ call :PrintInfo "Refreshing environment variables..."
         exit /b 0
     )
 )
+
+REM ---------------------------Link python to python3--------------------------------------------------
+
+:python3Check
+setlocal enabledelayedexpansion
+@(
+    (
+        python3 --version >nul 2>&1
+    ) && (
+        endlocal
+        call :PrintInfo "python3 is linked properly"
+        REM No need to create a symlink if python3 is already working
+        goto :installPythonStuff
+    ) || (
+        REM python3 symlink is not created - inform the user
+        call :PrintWarning "python3 is not available to invoke python."
+        REM ask the user if they want to create a symlink python3 pointing to python
+        set /p "doLinking=Do you also want to invoke python via 'python3'? Press any key if unsure. (Y/n):: " 
+        if /i "!doLinking!"=="n" (
+            echo.
+            endlocal
+            call :PrintWarning "python3 is not linked! You will need to use 'python' to call the scripts."
+            goto :installPythonStuff
+        )
+    )
+)
+endlocal
+echo.
+REM Get path to the python.exe in the system path
+for /f "delims=" %%i in ('python -c "import sys; print(sys.executable)"') do (
+    set "pythonPath=%%i"
+)
+
+REM remove the python.exe from pythonPath variable
+set "pythonPath=%pythonPath:python.exe=%"
+set "pythonPath=%pythonPath:~0,-1%"
+
+REM Set the path to the cwd for easier symlinking
+pushd "%pythonPath%"
+
+REM make symlink to the python.exe
+mklink python3.exe python.exe
+
+REM revert the path to the cwd
+popd
 
 REM ---------------------------Install python packages--------------------------------------------------
 
@@ -290,4 +291,26 @@ exit /b 0
 
 :PrintInfo
 powershell Write-Host -ForegroundColor DarkCyan '[INFO] %*'
+exit /b 0
+
+:CheckWinGetResult
+if %1 NEQ 0 (
+    if %1 EQU -1978335212 (
+        REM No packages found
+        call :PrintError "%2 could not be found in the configured winget sources. Please try resetting the winget resources in an admin terminal with ""winget source reset --force""" or use the manual install method."
+        pause
+        call :CleanUp
+        REM Exit, no script exit (/b)
+        exit 1
+    )    
+    if %1 NEQ -1978335189 (
+        REM All other errors
+        REM -1978335189 means No applicable update found => We dont want to throw.
+        call :PrintError "An unhandled error occurred with winget (%1). Please try the manual install method."
+        pause
+        call :CleanUp
+        REM Exit, no script exit (/b)
+        exit 1
+    )
+)
 exit /b 0
